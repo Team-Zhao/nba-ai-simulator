@@ -1,10 +1,15 @@
-from pathlib import Path
-
-RAW_DATA_DIR = Path("data/raw")
-
+from nba_api.stats.endpoints import leaguegamelog
 
 def fetch_games():
-    print("Fetching NBA games...")
+    game_log = leaguegamelog.LeagueGameLog(
+        season="2025-26",
+        season_type_all_star="Regular Season",
+    )
+
+    df = game_log.get_data_frames()[0]
+
+    print(df.head())
+    print(df.columns)
 
 
 if __name__ == "__main__":
