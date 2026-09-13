@@ -16,28 +16,49 @@ RAW_DATA_DIR.mkdir(
     exist_ok=True,
 )
 
-TRADITIONAL_CHECKPOINT = RAW_DATA_DIR / "traditional_player_games.csv"
-ADVANCED_CHECKPOINT = RAW_DATA_DIR / "advanced_player_games.csv"
-COMPLETED_GAMES_FILE = RAW_DATA_DIR / "completed_game_ids.txt"
+PROCESSED_DATA_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
 
 SEASONS = [
     "2024-25",
     "2025-26",
 ]
 
-def load_completed_game_ids():
-    if not COMPLETED_GAMES_FILE.exists():
+def get_checkpoint_paths(season):
+    season_slug = season.replace("-", "_")
+
+    traditional_path = (
+        RAW_DATA_DIR
+        / f"traditional_player_games_{season_slug}.csv"
+    )
+
+    advanced_path = (
+        RAW_DATA_DIR
+        / f"advanced_player_games_{season_slug}.csv"
+    )
+
+    completed_path = (
+        RAW_DATA_DIR
+        / f"completed_game_ids_{season_slug}.txt"
+    )
+
+    return traditional_path, advanced_path, completed_path
+
+def load_completed_game_ids(completed_games_file):
+    if not completed_games_file.exists():
         return set()
 
-    with open(COMPLETED_GAMES_FILE, "r") as f:
+    with open(completed_games_file, "r") as f:
         return {
             line.strip()
             for line in f
             if line.strip()
         }
 
-def save_completed_game_id(game_id):
-    with open(COMPLETED_GAMES_FILE, "a") as f:
+def save_completed_game_id(game_id, completed_games_file,):
+    with open(completed_games_file, "a") as f:
         f.write(f"{game_id}\n")
 
 def append_to_csv(df, path):
@@ -104,7 +125,12 @@ def fetch_advanced_box_score(game_id, max_retries=3):
 
 def fetch_season_player_games(season, max_games=None):
     games_df, game_ids = fetch_game_ids(season)
-    completed_game_ids = load_completed_game_ids()
+
+    (traditional_checkpoint, advanced_checkpoint, completed_games_file,) = get_checkpoint_paths(season)
+
+    completed_game_ids = load_completed_game_ids(
+        completed_games_file
+    )
 
     if max_games is not None:
         game_ids = game_ids[:max_games]
@@ -124,31 +150,156 @@ def fetch_season_player_games(season, max_games=None):
 
         append_to_csv(
             traditional_df,
-            TRADITIONAL_CHECKPOINT,
+            traditional_checkpoint,
         )
         append_to_csv(
             advanced_df,
-            ADVANCED_CHECKPOINT,
+            advanced_checkpoint,
         )
-        save_completed_game_id(game_id)
+
+        save_completed_game_id(game_id,completed_games_file,)
         completed_game_ids.add(game_id)
 
         time.sleep(0.6)
 
     traditional_games_df = pd.read_csv(
-        TRADITIONAL_CHECKPOINT
+        traditional_checkpoint,
+        dtype={"gameId": str},
     )
 
     advanced_games_df = pd.read_csv(
-        ADVANCED_CHECKPOINT
+        advanced_checkpoint,
+        dtype={"gameId": str},
     )
 
-    return games_df, traditional_games_df, advanced_games_df
+    player_games_df = build_player_games(
+        traditional_games_df,
+        advanced_games_df,
+        games_df,
+        season,
+    )
+
+    return player_games_df
+
+def clean_advanced_player_games(advanced_df):
+    advanced_df = advanced_df.copy()
+
+    advanced_df["has_minutes"] = (
+        advanced_df["minutes"].notna()
+    )
+
+    advanced_df = (
+        advanced_df
+        .sort_values("has_minutes")
+        .drop_duplicates(
+            subset=["gameId", "personId"],
+            keep="last",
+        )
+        .drop(columns="has_minutes")
+        .reset_index(drop=True)
+    )
+
+    return advanced_df
+
+def build_player_games(
+    traditional_df,
+    advanced_df,
+    games_df,
+    season,
+):
+    traditional_df = traditional_df.copy()
+    advanced_df = advanced_df.copy()
+    games_df = games_df.copy()
+
+    traditional_df["gameId"] = (
+        traditional_df["gameId"]
+        .astype(str)
+        .str.zfill(10)
+    )
+
+    advanced_df["gameId"] = (
+        advanced_df["gameId"]
+        .astype(str)
+        .str.zfill(10)
+    )
+
+    games_df["GAME_ID"] = (
+        games_df["GAME_ID"]
+        .astype(str)
+        .str.zfill(10)
+    )
+
+    advanced_df = clean_advanced_player_games(
+        advanced_df
+    )
+
+    advanced_features = [
+        "gameId",
+        "personId",
+        "effectiveFieldGoalPercentage",
+        "trueShootingPercentage",
+        "usagePercentage",
+        "assistPercentage",
+        "assistToTurnover",
+        "assistRatio",
+        "turnoverRatio",
+        "offensiveReboundPercentage",
+        "defensiveReboundPercentage",
+        "reboundPercentage",
+        "offensiveRating",
+        "defensiveRating",
+        "netRating",
+        "possessions",
+        "PIE",
+    ]
+
+    player_games_df = traditional_df.merge(
+        advanced_df[advanced_features],
+        on=["gameId", "personId"],
+        how="left",
+        validate="one_to_one",
+    )
+
+    game_dates = (
+        games_df[["GAME_ID", "GAME_DATE"]]
+        .drop_duplicates()
+        .rename(
+            columns={
+                "GAME_ID": "gameId",
+                "GAME_DATE": "gameDate",
+            }
+        )
+    )
+
+    player_games_df = player_games_df.merge(
+        game_dates,
+        on="gameId",
+        how="left",
+        validate="many_to_one",
+    )
+
+    player_games_df["gameDate"] = pd.to_datetime(
+        player_games_df["gameDate"]
+    )
+
+    player_games_df["season"] = season
+
+    return player_games_df
 
 if __name__ == "__main__":
-    games_df, traditional_df, advanced_df = fetch_season_player_games(
-        "2024-25",
+    player_games_df = fetch_season_player_games(
+        "2025-26"
     )
 
-    print("Traditional:", traditional_df.shape)
-    print("Advanced:", advanced_df.shape)
+    output_path = (
+        PROCESSED_DATA_DIR
+        / "player_games_2025_26.csv"
+    )
+
+    player_games_df.to_csv(
+        output_path,
+        index=False,
+    )
+
+    print(player_games_df.shape)
+    print(f"Saved to {output_path}")
