@@ -8,12 +8,12 @@ PROCESSED_DATA_DIR = Path("data/processed")
 
 INPUT_PATH = (
     PROCESSED_DATA_DIR
-    / "player_games_two_seasons.csv"
+    / "player_games_train_window.csv"
 )
 
 OUTPUT_PATH = (
     PROCESSED_DATA_DIR
-    / "player_ratings.csv"
+    / "player_ratings_train.csv"
 )
 
 PLAYER_PROFILES_PATH = (
@@ -372,6 +372,16 @@ def add_physical_rating(ratings_df, profiles_df):
         + 0.45 * profiles_df["weightPercentile"]
     )
 
+    profiles_df["personId"] = (
+        profiles_df["personId"]
+        .astype(int)
+    )
+
+    ratings_df["personId"] = (
+        ratings_df["personId"]
+        .astype(int)
+    )
+
     ratings_df = ratings_df.merge(
         profiles_df[
             [
@@ -388,7 +398,26 @@ def add_physical_rating(ratings_df, profiles_df):
         how="left",
         validate="one_to_one",
     )
-    
+
+    missing_profiles = ratings_df[
+        ratings_df["position"].isna()
+    ]
+
+    print(
+        "Missing profiles:",
+        len(missing_profiles)
+    )
+
+    print(
+        missing_profiles[
+            [
+                "personId",
+                "firstName",
+                "familyName",
+            ]
+        ].head(20)
+    )
+
     return ratings_df
 
 def main():
@@ -435,6 +464,11 @@ def main():
     ratings_df[rating_cols] = (
         ratings_df[rating_cols]
         .round(1)
+    )
+
+    ratings_df["shooting"] = (
+        ratings_df["shooting"]
+        .fillna(50.0)
     )
 
     ratings_df.to_csv(

@@ -7,10 +7,11 @@ from nba_api.stats.endpoints import commonplayerinfo
 
 PROCESSED_DATA_DIR = Path("data/processed")
 
-PLAYER_RATINGS_PATH = (
-    PROCESSED_DATA_DIR
-    / "player_ratings.csv"
-)
+PLAYER_GAME_PATHS = [
+    PROCESSED_DATA_DIR / "player_games_2023_24.csv",
+    PROCESSED_DATA_DIR / "player_games_2024_25.csv",
+    PROCESSED_DATA_DIR / "player_games_2025_26.csv",
+]
 
 OUTPUT_PATH = (
     PROCESSED_DATA_DIR
@@ -45,9 +46,17 @@ def height_to_inches(height):
     if pd.isna(height):
         return None
 
-    feet, inches = height.split("-")
+    height = str(height).strip()
 
-    return int(feet) * 12 + int(inches)
+    if "-" not in height:
+        return None
+
+    feet, inches = height.split("-", 1)
+
+    try:
+        return int(feet) * 12 + int(inches)
+    except ValueError:
+        return None
 
 def clean_player_profile(profile_df):
     row = profile_df.iloc[0]
@@ -70,32 +79,40 @@ def clean_player_profile(profile_df):
         ),
     }
 
-def fetch_all_player_profiles(ratings_df):
-    profiles = []
-
-    completed_ids = set()
-
+def fetch_all_player_profiles(player_ids):
     if CHECKPOINT_PATH.exists():
         checkpoint_df = pd.read_csv(
             CHECKPOINT_PATH
         )
 
         completed_ids = set(
-            checkpoint_df["personId"].tolist()
+            checkpoint_df["personId"].astype(int)
         )
+    else:
+        completed_ids = set()
+
+    missing_ids = [
+        int(person_id)
+        for person_id in player_ids
+        if int(person_id) not in completed_ids
+    ]
+
+    print(
+        f"Total players: {len(player_ids)}"
+    )
+    print(
+        f"Already completed: {len(completed_ids)}"
+    )
+    print(
+        f"Need to fetch: {len(missing_ids)}"
+    )
 
     for i, person_id in enumerate(
-        ratings_df["personId"],
+        missing_ids,
         start=1,
     ):
-        if person_id in completed_ids:
-            print(
-                f"Skipping completed player: {person_id}"
-            )
-            continue
-
         print(
-            f"{i}/{len(ratings_df)} - {person_id}"
+            f"{i}/{len(missing_ids)} - {person_id}"
         )
 
         profile_df = fetch_player_profile(
@@ -110,8 +127,6 @@ def fetch_all_player_profiles(ratings_df):
             profile_df
         )
 
-        profiles.append(cleaned_profile)
-
         pd.DataFrame(
             [cleaned_profile]
         ).to_csv(
@@ -121,8 +136,6 @@ def fetch_all_player_profiles(ratings_df):
             index=False,
         )
 
-        completed_ids.add(person_id)
-
         time.sleep(0.6)
 
     return pd.read_csv(
@@ -130,12 +143,23 @@ def fetch_all_player_profiles(ratings_df):
     )
 
 if __name__ == "__main__":
-    ratings_df = pd.read_csv(
-        PLAYER_RATINGS_PATH
+    player_games_df = pd.concat(
+        [
+            pd.read_csv(path)
+            for path in PLAYER_GAME_PATHS
+        ],
+        ignore_index=True,
+    )
+
+    player_ids = (
+        player_games_df["personId"]
+        .dropna()
+        .astype(int)
+        .unique()
     )
 
     profiles_df = fetch_all_player_profiles(
-        ratings_df
+        player_ids
     )
 
     profiles_df.to_csv(
