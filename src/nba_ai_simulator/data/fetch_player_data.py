@@ -22,6 +22,7 @@ PROCESSED_DATA_DIR.mkdir(
 )
 
 SEASONS = [
+    "2023-24",
     "2024-25",
     "2025-26",
 ]
@@ -288,12 +289,12 @@ def build_player_games(
 
 if __name__ == "__main__":
     player_games_df = fetch_season_player_games(
-        "2025-26"
+        "2023-24"
     )
 
     output_path = (
         PROCESSED_DATA_DIR
-        / "player_games_2025_26.csv"
+        / "player_games_2023_24.csv"
     )
 
     player_games_df.to_csv(
