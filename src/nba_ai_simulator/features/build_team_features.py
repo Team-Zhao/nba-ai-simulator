@@ -6,9 +6,9 @@ RECENT_GAMES = 10
 
 PROCESSED_DATA_DIR = Path("data/processed")
 
-PLAYER_GAMES_PATH = (
+PLAYER_RATINGS_PATH = (
     PROCESSED_DATA_DIR
-    / "player_games_2025_26.csv"
+    / "player_ratings_train.csv"
 )
 
 PLAYER_RATINGS_PATH = (
