@@ -532,10 +532,33 @@ def add_game_outcomes(game_df, games_df):
     outcomes = games_df[
         [
             "GAME_ID",
+            "GAME_DATE",
             "TEAM_ABBREVIATION",
             "PTS",
         ]
     ].copy()
+
+    game_dates = (
+        outcomes[
+            [
+                "GAME_ID",
+                "GAME_DATE",
+            ]
+        ]
+        .drop_duplicates("GAME_ID")
+        .rename(
+            columns={
+                "GAME_ID": "gameId",
+                "GAME_DATE": "gameDate",
+            }
+        )
+    )
+
+    game_dates["gameId"] = (
+        game_dates["gameId"]
+        .astype(str)
+        .str.zfill(10)
+    )
 
     outcomes["gameId"] = (
         outcomes["GAME_ID"]
@@ -597,6 +620,17 @@ def add_game_outcomes(game_df, games_df):
     game_df["homeWin"] = (
         game_df["homePointDiff"] > 0
     ).astype(int)
+
+    game_df = game_df.merge(
+        game_dates,
+        on="gameId",
+        how="left",
+        validate="one_to_one",
+    )
+
+    game_df["gameDate"] = pd.to_datetime(
+        game_df["gameDate"]
+    )
 
     return game_df
 
@@ -885,4 +919,21 @@ if __name__ == "__main__":
     print(
         "Home win rate:",
         game_df["homeWin"].mean()
+    )
+
+    print(
+        game_df[
+            [
+                "gameId",
+                "gameDate",
+                "homeTeam",
+                "awayTeam",
+                "homePointDiff",
+            ]
+        ].head()
+    )
+
+    print(
+        "Missing gameDate:",
+        game_df["gameDate"].isna().sum()
     )
