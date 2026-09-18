@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import joblib
 
 from sklearn.linear_model import (
     LinearRegression,
@@ -17,6 +18,18 @@ from sklearn.metrics import brier_score_loss
 from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
 
+MODEL_DIR = Path("models")
+MODEL_DIR.mkdir(exist_ok=True)
+
+LINEAR_MODEL_PATH = (
+    MODEL_DIR
+    / "linear_game_model_v1.joblib"
+)
+
+LOGISTIC_MODEL_PATH = (
+    MODEL_DIR
+    / "logistic_game_model_v1.joblib"
+)
 
 PROCESSED_DATA_DIR = Path("data/processed")
 
@@ -668,4 +681,24 @@ if __name__ == "__main__":
         benchmark.to_string(
             index=False
         )
+    )
+
+    joblib.dump(
+        model,
+        LINEAR_MODEL_PATH,
+    )
+
+    joblib.dump(
+        logistic_model,
+        LOGISTIC_MODEL_PATH,
+    )
+
+    print(
+        f"Saved linear model to "
+        f"{LINEAR_MODEL_PATH}"
+    )
+
+    print(
+        f"Saved logistic model to "
+        f"{LOGISTIC_MODEL_PATH}"
     )
