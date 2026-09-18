@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from nba_api.stats.endpoints import leaguegamelog
+from nba_api.live.nba.endpoints import boxscore
 
 RECENT_GAMES = 10
 
@@ -21,6 +23,11 @@ PLAYER_PROFILES_PATH = (
     / "player_profiles.csv"
 )
 
+OUTPUT_PATH = (
+    PROCESSED_DATA_DIR
+    / "game_features_2025_26.csv"
+)
+
 RATING_COLS = [
     "finishing",
     "shooting",
@@ -29,6 +36,29 @@ RATING_COLS = [
     "rebounding",
     "physical",
 ]
+
+HOME_AWAY_OVERRIDES = {
+    "0022500147": {
+        "homeTeam": "DET",
+        "awayTeam": "DAL",
+    },
+    "0022500578": {
+        "homeTeam": "ORL",
+        "awayTeam": "MEM",
+    },
+    "0022500602": {
+        "homeTeam": "MEM",
+        "awayTeam": "ORL",
+    },
+    "0022501229": {
+        "homeTeam": "ORL",
+        "awayTeam": "NYK",
+    },
+    "0022501230": {
+        "homeTeam": "OKC",
+        "awayTeam": "SAS",
+    },
+}
 
 def merge_player_ratings(
     player_games_df,
@@ -340,6 +370,236 @@ def build_team_game_ratings(df):
         ]
     ]
 
+def add_home_away(
+    team_df,
+    games_df,
+    schedule_df=None,
+):
+    locations = games_df[
+        [
+            "GAME_ID",
+            "TEAM_ABBREVIATION",
+            "MATCHUP",
+        ]
+    ].copy()
+
+    locations["gameId"] = (
+        locations["GAME_ID"]
+        .astype(str)
+        .str.zfill(10)
+    )
+
+    locations["teamTricode"] = (
+        locations["TEAM_ABBREVIATION"]
+    )
+
+    locations["isHome"] = (
+        locations["MATCHUP"]
+        .str.contains("vs.")
+    )
+
+    bad_games = (
+        locations
+        .groupby("gameId")["isHome"]
+        .agg(
+            rows="size",
+            homeCount="sum",
+        )
+    )
+
+    bad_games = bad_games[
+        (bad_games["rows"] != 2)
+        | (bad_games["homeCount"] != 1)
+    ]
+
+    bad_game_ids = set(
+        bad_games.index
+    )
+
+    if schedule_df is not None and bad_game_ids:
+        schedule_subset = schedule_df[
+            schedule_df["gameId"].isin(
+                bad_game_ids
+            )
+        ]
+
+        for _, row in schedule_subset.iterrows():
+            locations.loc[
+                (locations["gameId"] == row["gameId"])
+                & (
+                    locations["teamTricode"]
+                    == row["homeTeam"]
+                ),
+                "isHome",
+            ] = True
+
+            locations.loc[
+                (locations["gameId"] == row["gameId"])
+                & (
+                    locations["teamTricode"]
+                    == row["awayTeam"]
+                ),
+                "isHome",
+            ] = False
+
+    locations = locations[
+        [
+            "gameId",
+            "teamTricode",
+            "isHome",
+        ]
+    ]
+
+    return team_df.merge(
+        locations,
+        on=[
+            "gameId",
+            "teamTricode",
+        ],
+        how="left",
+        validate="one_to_one",
+    )
+
+def build_game_matchup_features(team_df):
+    home_df = (
+        team_df[
+            team_df["isHome"]
+        ]
+        .copy()
+    )
+
+    away_df = (
+        team_df[
+            ~team_df["isHome"]
+        ]
+        .copy()
+    )
+
+    home_df = home_df.rename(
+        columns={
+            "teamTricode": "homeTeam",
+            "teamFinishing": "homeFinishing",
+            "teamShooting": "homeShooting",
+            "teamPlaymaking": "homePlaymaking",
+            "teamDefense": "homeDefense",
+            "teamRebounding": "homeRebounding",
+            "teamPhysical": "homePhysical",
+        }
+    )
+
+    away_df = away_df.rename(
+        columns={
+            "teamTricode": "awayTeam",
+            "teamFinishing": "awayFinishing",
+            "teamShooting": "awayShooting",
+            "teamPlaymaking": "awayPlaymaking",
+            "teamDefense": "awayDefense",
+            "teamRebounding": "awayRebounding",
+            "teamPhysical": "awayPhysical",
+        }
+    )
+
+    game_df = home_df.merge(
+        away_df,
+        on="gameId",
+        how="inner",
+        validate="one_to_one",
+    )
+
+    return game_df
+
+def add_rating_differences(game_df):
+    game_df = game_df.copy()
+
+    for rating in [
+        "Finishing",
+        "Shooting",
+        "Playmaking",
+        "Defense",
+        "Rebounding",
+        "Physical",
+    ]:
+        game_df[
+            f"{rating.lower()}Diff"
+        ] = (
+            game_df[f"home{rating}"]
+            - game_df[f"away{rating}"]
+        )
+
+    return game_df
+
+def add_game_outcomes(game_df, games_df):
+    outcomes = games_df[
+        [
+            "GAME_ID",
+            "TEAM_ABBREVIATION",
+            "PTS",
+        ]
+    ].copy()
+
+    outcomes["gameId"] = (
+        outcomes["GAME_ID"]
+        .astype(str)
+        .str.zfill(10)
+    )
+
+    home_scores = outcomes.rename(
+        columns={
+            "TEAM_ABBREVIATION": "homeTeam",
+            "PTS": "homeScore",
+        }
+    )[
+        [
+            "gameId",
+            "homeTeam",
+            "homeScore",
+        ]
+    ]
+
+    away_scores = outcomes.rename(
+        columns={
+            "TEAM_ABBREVIATION": "awayTeam",
+            "PTS": "awayScore",
+        }
+    )[
+        [
+            "gameId",
+            "awayTeam",
+            "awayScore",
+        ]
+    ]
+
+    game_df = game_df.merge(
+        home_scores,
+        on=[
+            "gameId",
+            "homeTeam",
+        ],
+        how="left",
+        validate="one_to_one",
+    )
+
+    game_df = game_df.merge(
+        away_scores,
+        on=[
+            "gameId",
+            "awayTeam",
+        ],
+        how="left",
+        validate="one_to_one",
+    )
+
+    game_df["homePointDiff"] = (
+        game_df["homeScore"]
+        - game_df["awayScore"]
+    )
+
+    game_df["homeWin"] = (
+        game_df["homePointDiff"] > 0
+    ).astype(int)
+
+    return game_df
+
 # if __name__ == "__main__":
 #     df = prepare_team_feature_data()
 
@@ -370,6 +630,58 @@ def build_team_game_ratings(df):
 #         .sum()
 #     )
 
+# def fetch_schedule_home_away():
+#     import requests
+
+#     url = (
+#         "https://cdn.nba.com/static/json/"
+#         "staticData/scheduleLeagueV2.json"
+#     )
+
+#     schedule = requests.get(url).json()
+
+#     rows = []
+
+#     for date_block in schedule[
+#         "leagueSchedule"
+#     ]["gameDates"]:
+
+#         for game in date_block["games"]:
+#             rows.append({
+#                 "gameId": str(
+#                     game["gameId"]
+#                 ).zfill(10),
+
+#                 "homeTeam": (
+#                     game["homeTeam"]["teamTricode"]
+#                 ),
+
+#                 "awayTeam": (
+#                     game["awayTeam"]["teamTricode"]
+#                 ),
+#             })
+
+#     return pd.DataFrame(rows)
+
+def fetch_home_away_fallback(
+    bad_game_ids,
+    games_df,
+):
+    rows = []
+
+    for game_id in bad_game_ids:
+        if game_id not in HOME_AWAY_OVERRIDES:
+            raise ValueError(
+                f"No home/away override for {game_id}"
+            )
+
+        rows.append({
+            "gameId": game_id,
+            **HOME_AWAY_OVERRIDES[game_id],
+        })
+
+    return pd.DataFrame(rows)
+
 if __name__ == "__main__":
     df = prepare_team_feature_data()
 
@@ -377,36 +689,200 @@ if __name__ == "__main__":
         df
     )
 
-    print(team_df.shape)
-    print(team_df.head(20))
+    game_log = leaguegamelog.LeagueGameLog(
+        season="2025-26",
+        season_type_all_star="Regular Season",
+    )
+
+    games_df = game_log.get_data_frames()[0]
+
+    locations_check = games_df.copy()
+
+    locations_check["gameId"] = (
+        locations_check["GAME_ID"]
+        .astype(str)
+        .str.zfill(10)
+    )
+
+    locations_check["isHome"] = (
+        locations_check["MATCHUP"]
+        .str.contains("vs.")
+    )
+
+    bad_games = (
+        locations_check
+        .groupby("gameId")["isHome"]
+        .agg(
+            rows="size",
+            homeCount="sum",
+        )
+    )
+
+    bad_games = bad_games[
+        (bad_games["rows"] != 2)
+        | (bad_games["homeCount"] != 1)
+    ]
+
+    schedule_df = fetch_home_away_fallback(
+        bad_games.index.tolist(),
+        games_df,
+    )
+
+    team_df = add_home_away(
+        team_df,
+        games_df,
+        schedule_df,
+    )
+
+    print(bad_games)
 
     print(
         team_df[
+            team_df["gameId"].isin(
+                bad_games.index
+            )
+        ][
             [
-                "teamFinishing",
-                "teamShooting",
-                "teamPlaymaking",
-                "teamDefense",
-                "teamRebounding",
-                "teamPhysical",
+                "gameId",
+                "teamTricode",
+                "isHome",
+            ]
+        ]
+        .sort_values("gameId")
+    )
+
+    bad_game_ids = set(
+        bad_games.index
+    )
+
+    check_games = games_df.copy()
+
+    check_games["gameId"] = (
+        check_games["GAME_ID"]
+        .astype(str)
+        .str.zfill(10)
+    )
+
+    print(
+        check_games[
+            check_games["gameId"].isin(
+                bad_game_ids
+            )
+        ][
+            [
+                "gameId",
+                "TEAM_ABBREVIATION",
+                "MATCHUP",
+            ]
+        ]
+        .sort_values("gameId")
+        .to_string(index=False)
+    )
+
+    game_df = build_game_matchup_features(
+        team_df
+    )
+
+    game_df = add_rating_differences(
+        game_df
+    )
+
+    game_df = add_game_outcomes(
+        game_df,
+        games_df,
+    )
+
+    print(game_df.shape)
+
+    bad_game_ids = set(
+        bad_games.index
+    )
+
+    check_games = games_df.copy()
+
+    check_games["gameId"] = (
+        check_games["GAME_ID"]
+        .astype(str)
+        .str.zfill(10)
+    )
+
+    print(
+        check_games[
+            check_games["gameId"].isin(
+                bad_game_ids
+            )
+        ][
+            [
+                "gameId",
+                "TEAM_ABBREVIATION",
+                "MATCHUP",
+            ]
+        ]
+        .sort_values("gameId")
+        .to_string(index=False)
+    )
+
+    print(
+        game_df[
+            [
+                "gameId",
+                "homeTeam",
+                "awayTeam",
+                "homeScore",
+                "awayScore",
+                "homePointDiff",
+                "homeWin",
+                "finishingDiff",
+                "shootingDiff",
+                "playmakingDiff",
+                "defenseDiff",
+                "reboundingDiff",
+                "physicalDiff",
+            ]
+        ].head(20)
+    )
+
+    print(
+        game_df[
+            [
+                "homeScore",
+                "awayScore",
+                "homePointDiff",
             ]
         ]
         .isna()
         .sum()
     )
 
+    game_df.to_csv(
+        OUTPUT_PATH,
+        index=False,
+    )
+
+    print(f"Saved to {OUTPUT_PATH}")
+    print("Games:", game_df["gameId"].nunique())
+
     print(
-        "Games:",
-        team_df["gameId"].nunique(),
+        game_df[
+            [
+                "finishingDiff",
+                "shootingDiff",
+                "playmakingDiff",
+                "defenseDiff",
+                "reboundingDiff",
+                "physicalDiff",
+                "homePointDiff",
+            ]
+        ].describe()
     )
 
     print(
-        "Teams per game:"
+        game_df[
+            "homePointDiff"
+        ].describe()
     )
 
     print(
-        team_df.groupby("gameId")
-        .size()
-        .value_counts()
-        .sort_index()
+        "Home win rate:",
+        game_df["homeWin"].mean()
     )
