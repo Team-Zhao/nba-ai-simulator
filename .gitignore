@@ -4,3 +4,11 @@ __pycache__/
 .env
 .ipynb_checkpoints/
 .DS_Store
+data/raw/*
+data/processed/*
+
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Optional small sample files
+!data/sample/
