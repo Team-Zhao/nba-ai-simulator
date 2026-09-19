@@ -1,6 +1,6 @@
 # NBA AI Simulator
 
-A NBA game prediction system built around dynamic player ratings, roster-based team features, and machine learning (inspired by the NBA 2K series).
+An NBA game prediction system built around dynamic player ratings, roster-based team features, and machine learning (inspired by the NBA 2K series).
 
 This simulator converts historical NBA player performance into six-dimensional player ratings, aggregates those ratings into team-level matchup features. It then predicts both game outcomes and expected point differential.
 
