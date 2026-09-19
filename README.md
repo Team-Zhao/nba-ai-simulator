@@ -75,5 +75,9 @@ V1 compares four models:
 | Random Forest | 77.2% | 0.543 | 0.180 | — | — |
 | XGBoost | 75.2% | 0.541 | 0.181 | — | — |
 
+## License
 
+This project is licensed under the MIT License.
+
+NBA statistics used by this project are accessed through `nba_api` / NBA.com and are subject to the applicable NBA.com terms of use.
 
