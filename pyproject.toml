@@ -1,7 +1,7 @@
 [project]
 name = "nba-ai-simulator"
-version = "0.1.0"
-description = "Add your description here"
+version = "1.0.0"
+description = "NBA game prediction system using player ratings, team features, and machine learning"
 readme = "README.md"
 authors = [
     { name = "Michael Zhao", email = "muqingzhao526@gmail.com" }
