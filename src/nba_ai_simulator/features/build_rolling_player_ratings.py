@@ -8,6 +8,11 @@ DATA_PATH = (
     / "player_games_two_seasons.csv"
 )
 
+PROFILE_PATH = (
+    Path("data/processed")
+    / "player_profiles.csv"
+)
+
 COUNTING_STATS = [
     "minutesNumeric",
     "points",
@@ -339,6 +344,100 @@ def add_skill_ratings(df):
 
     return df
 
+def get_position_group(position):
+    if pd.isna(position):
+        return "Unknown"
+
+    if position == "Guard":
+        return "Guard"
+
+    if position in {
+        "Guard-Forward",
+        "Forward-Guard",
+    }:
+        return "Wing"
+
+    if position == "Forward":
+        return "Forward"
+
+    if position in {
+        "Forward-Center",
+        "Center-Forward",
+        "Center",
+    }:
+        return "Big"
+
+    return "Unknown"
+
+def load_player_profiles():
+    profiles = pd.read_csv(PROFILE_PATH)
+
+    profiles["positionGroup"] = (
+        profiles["position"]
+        .apply(get_position_group)
+    )
+
+    return profiles
+
+def build_physical_ratings(profiles):
+    profiles = profiles.copy()
+
+    profiles["weight"] = pd.to_numeric(
+        profiles["weight"],
+        errors="coerce",
+    )
+
+    profiles["weight"] = (
+        profiles["weight"]
+        .fillna(
+            profiles.groupby(
+                "positionGroup"
+            )["weight"].transform("median")
+        )
+    )
+
+    profiles["heightPct"] = (
+        profiles.groupby("positionGroup")["heightInches"]
+        .rank(pct=True)
+        * 100
+    )
+
+    profiles["weightPct"] = (
+        profiles.groupby("positionGroup")["weight"]
+        .rank(pct=True)
+        * 100
+    )
+
+    profiles["physical"] = (
+        0.55 * profiles["heightPct"]
+        + 0.45 * profiles["weightPct"]
+    )
+
+    return profiles[
+        [
+            "personId",
+            "physical",
+        ]
+    ]
+
+def add_physical_rating(df):
+    profiles = load_player_profiles()
+    physical = build_physical_ratings(profiles)
+
+    df = df.merge(
+        physical,
+        on="personId",
+        how="left",
+        validate="many_to_one",
+    )
+
+    df["physical"] = (
+        df["physical"]
+        .fillna(50.0)
+    )
+
+    return df
+
 def main():
     df = load_player_games()
     df = add_minutes_numeric(df)
@@ -356,6 +455,7 @@ def main():
     )
 
     df = add_skill_ratings(df)
+    df = add_physical_rating(df)
 
     print(
         df[
@@ -368,9 +468,49 @@ def main():
                 "playmaking",
                 "defense",
                 "rebounding",
+                "physical",
             ]
         ].head(30)
     )
+
+    RATING_COLS = [
+        "finishing",
+        "shooting",
+        "playmaking",
+        "defense",
+        "rebounding",
+        "physical",
+    ]
+
+    df[RATING_COLS] = (
+        df[RATING_COLS]
+        .round(1)
+    )
+    OUTPUT_PATH = (
+        Path("data/processed")
+        / "player_ratings_rolling.csv"
+    )
+    output_cols = [
+        "gameId",
+        "gameDate",
+        "personId",
+        "teamTricode",
+        "priorGames",
+        "finishing",
+        "shooting",
+        "playmaking",
+        "defense",
+        "rebounding",
+        "physical",
+    ]
+
+    df[output_cols].to_csv(
+        OUTPUT_PATH,
+        index=False,
+    )
+
+    print(f"Saved to {OUTPUT_PATH}")
+    print(df[output_cols].shape)
 
 
 if __name__ == "__main__":
