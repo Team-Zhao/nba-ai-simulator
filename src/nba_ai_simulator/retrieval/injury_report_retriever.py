@@ -7,6 +7,10 @@ import pandas as pd
 import re
 import unicodedata
 from nba_api.stats.static import players
+from nba_ai_simulator.agents.availability_agent import (
+    AvailabilityUpdate,
+    validate_availability_update,
+)
 
 NBA_INJURY_REPORT_BASE_URL = (
     "https://ak-static.cms.nba.com/referee/injury"
@@ -394,6 +398,25 @@ def build_injury_report_url(
         f"Injury-Report_{date_str}_{report_hour}.pdf"
     )
 
+def injury_row_to_availability_update(
+    row,
+    source_url,
+):
+    update = AvailabilityUpdate(
+        personId=int(row["personId"]),
+        team=row["team"],
+        status=row["status"],
+        reason=row["reason"],
+        confidence="high",
+        sourceType="nba_official",
+        sourceUrl=source_url,
+        publishedAt=row["reportPublishedAt"].to_pydatetime(),
+    )
+
+    validate_availability_update(update)
+
+    return update
+
 def inspect_report_words(pdf_path):
     with pdfplumber.open(pdf_path) as pdf:
         page = pdf.pages[0]
@@ -591,6 +614,198 @@ def injury_name_to_normalized(name):
 
     return normalize_name(full_name)
 
+def injury_dataframe_to_updates(
+    matched_df,
+    source_url,
+):
+    updates = []
+
+    for _, row in matched_df.iterrows():
+        if pd.isna(row["personId"]):
+            continue
+
+        update = injury_row_to_availability_update(
+            row,
+            source_url=source_url,
+        )
+
+        updates.append(update)
+
+    return updates
+
+def filter_updates_for_game(
+    updates,
+    team_names,
+    prediction_timestamp,
+):
+    return [
+        update
+        for update in updates
+        if update.team in team_names
+        and update.publishedAt <= prediction_timestamp
+    ]
+
+def availability_updates_to_dataframe(
+    updates,
+):
+    rows = []
+
+    for update in updates:
+        rows.append(
+            {
+                "personId": update.personId,
+                "availabilityStatus": update.status,
+                "availabilityReason": update.reason,
+                "availabilityConfidence": update.confidence,
+                "availabilitySourceType": update.sourceType,
+                "availabilitySourceUrl": update.sourceUrl,
+                "availabilityPublishedAt": update.publishedAt,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+def apply_availability_updates(
+    roster_df,
+    updates,
+):
+    roster_df = roster_df.copy()
+
+    updates_df = (
+        availability_updates_to_dataframe(
+            updates
+        )
+    )
+
+    if updates_df.empty:
+        return roster_df
+
+    roster_df = roster_df.merge(
+        updates_df,
+        on="personId",
+        how="left",
+        validate="one_to_one",
+    )
+
+    roster_df[
+        "availabilityStatus"
+    ] = (
+        roster_df["availabilityStatus"]
+        .fillna("UNKNOWN")
+    )
+
+    return roster_df
+
+def retrieve_official_injury_updates(
+    report_date,
+    report_hour,
+    history_df,
+):
+    path = download_injury_report(
+        report_date=report_date,
+        report_hour=report_hour,
+    )
+
+    df = build_injury_report_dataframe(path)
+    df = clean_injury_report_dataframe(df)
+
+    history_lookup = build_player_lookup(
+        history_df
+    )
+
+    master_lookup = (
+        build_master_player_lookup()
+    )
+
+    df["normalizedName"] = (
+        df["playerName"]
+        .apply(injury_name_to_normalized)
+    )
+
+    matched = df.merge(
+        history_lookup[
+            [
+                "personId",
+                "normalizedName",
+            ]
+        ],
+        on="normalizedName",
+        how="left",
+        validate="many_to_one",
+    )
+
+    matched["matchSource"] = "history"
+
+    matched.loc[
+        matched["personId"].isna(),
+        "matchSource",
+    ] = None
+
+    unmatched_mask = (
+        matched["personId"].isna()
+    )
+
+    fallback_candidates = (
+        master_lookup[
+            [
+                "personId",
+                "normalizedName",
+            ]
+        ]
+        .groupby("normalizedName")
+        .agg(
+            personId=(
+                "personId",
+                "first",
+            ),
+            candidateCount=(
+                "personId",
+                "nunique",
+            ),
+        )
+        .reset_index()
+    )
+
+    fallback = matched.loc[
+        unmatched_mask,
+        ["normalizedName"]
+    ].merge(
+        fallback_candidates,
+        on="normalizedName",
+        how="left",
+        validate="many_to_one",
+    )
+
+    fallback.loc[
+        fallback["candidateCount"] != 1,
+        "personId",
+    ] = pd.NA
+
+    matched.loc[
+        unmatched_mask,
+        "personId",
+    ] = fallback[
+        "personId"
+    ].to_numpy()
+
+    matched.loc[
+        unmatched_mask
+        & matched["personId"].notna(),
+        "matchSource",
+    ] = "master_directory"
+
+    source_url = build_injury_report_url(
+        report_date=report_date,
+        report_hour=report_hour,
+    )
+
+    updates = injury_dataframe_to_updates(
+        matched,
+        source_url=source_url,
+    )
+
+    return updates
+
 if __name__ == "__main__":
     report_date = datetime(
         2025,
@@ -737,3 +952,51 @@ if __name__ == "__main__":
                 ]
             ].to_string(index=False)
         )
+
+    source_url = build_injury_report_url(
+        report_date=report_date,
+        report_hour="05PM",
+    )
+
+    first_update = (
+        injury_row_to_availability_update(
+            matched.iloc[0],
+            source_url=source_url,
+        )
+    )
+
+    print()
+    print("First availability update:")
+    print(first_update)
+    updates = injury_dataframe_to_updates(
+        matched,
+        source_url=source_url,
+    )
+
+    print()
+    print("Total availability updates:", len(updates))
+
+    print("\nFirst 5 updates:")
+    for update in updates[:5]:
+        print(update)
+
+    game_updates = filter_updates_for_game(
+        updates,
+        team_names={
+            "New York Knicks",
+            "Philadelphia 76ers",
+        },
+        prediction_timestamp=datetime(
+            2025,
+            1,
+            15,
+            18,
+            0,
+        ),
+    )
+
+    print()
+    print("NYK vs PHI updates:")
+
+    for update in game_updates:
+        print(update)
