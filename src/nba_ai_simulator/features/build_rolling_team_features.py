@@ -139,17 +139,24 @@ def add_expected_minutes_fallback(df):
 
     return df
 
-def build_team_game_ratings(df):
+def build_team_game_ratings(
+    df,
+    weight_col="expectedMinutes",
+):
     df = df.copy()
+
+    assert weight_col in df.columns, (
+        f"Missing weight column: {weight_col}"
+    )
 
     for rating in RATING_COLS:
         df[f"{rating}Weighted"] = (
-            df[rating] * df["expectedMinutes"]
+            df[rating] * df[weight_col]
         )
 
     agg_dict = {
         "expectedMinutesTotal": (
-            "expectedMinutes",
+            weight_col,
             "sum",
         ),
     }
