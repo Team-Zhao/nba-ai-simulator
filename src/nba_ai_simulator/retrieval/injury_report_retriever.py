@@ -1,5 +1,5 @@
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from pypdf import PdfReader
 import pdfplumber
 import requests
@@ -389,13 +389,17 @@ def extract_report_rows(pdf_path):
 
 def build_injury_report_url(
     report_date,
-    report_hour,
+    report_time,
 ):
-    date_str = report_date.strftime("%Y-%m-%d")
+    date_str = report_date.strftime(
+        "%Y-%m-%d"
+    )
 
     return (
         f"{NBA_INJURY_REPORT_BASE_URL}/"
-        f"Injury-Report_{date_str}_{report_hour}.pdf"
+        f"Injury-Report_"
+        f"{date_str}_"
+        f"{report_time}.pdf"
     )
 
 def injury_row_to_availability_update(
@@ -470,15 +474,25 @@ def extract_report_published_at(pdf_path):
 
 def download_injury_report(
     report_date,
-    report_hour,
+    report_time,
 ):
     url = build_injury_report_url(
         report_date,
-        report_hour,
+        report_time,
     )
 
     response = requests.get(
         url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 "
+                "(Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/154.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://official.nba.com/",
+        },
         timeout=30,
     )
 
@@ -491,7 +505,11 @@ def download_injury_report(
 
     output_path = (
         RAW_INJURY_DIR
-        / f"injury_report_{report_date:%Y-%m-%d}_{report_hour}.pdf"
+        / (
+            f"injury_report_"
+            f"{report_date:%Y-%m-%d}_"
+            f"{report_time}.pdf"
+        )
     )
 
     output_path.write_bytes(
@@ -499,6 +517,89 @@ def download_injury_report(
     )
 
     return output_path
+
+def find_latest_injury_report(
+    prediction_timestamp,
+):
+    candidate_time = (
+        prediction_timestamp
+        .replace(
+            second=0,
+            microsecond=0,
+        )
+    )
+
+    # Round down to the nearest 15 minutes.
+    minute = (
+        candidate_time.minute
+        // 15
+        * 15
+    )
+
+    candidate_time = (
+        candidate_time.replace(
+            minute=minute
+        )
+    )
+
+    report_date = (
+        prediction_timestamp
+    )
+
+    while (
+        candidate_time.date()
+        == prediction_timestamp.date()
+    ):
+        report_time = (
+            candidate_time.strftime(
+                "%I_%M%p"
+            )
+        )
+
+        url = build_injury_report_url(
+            report_date,
+            report_time,
+        )
+
+        try:
+            path = download_injury_report(
+                report_date=report_date,
+                report_time=report_time,
+            )
+
+            print(
+                "Using injury report:",
+                report_time,
+            )
+
+            return (
+                path,
+                url,
+                report_time,
+            )
+
+        except requests.HTTPError as exc:
+            status_code = (
+                exc.response.status_code
+                if exc.response is not None
+                else None
+            )
+
+            if status_code not in {
+                403,
+                404,
+            }:
+                raise
+
+        candidate_time -= timedelta(
+            minutes=15
+        )
+
+    raise FileNotFoundError(
+        "No official NBA injury report "
+        f"found before "
+        f"{prediction_timestamp}."
+    )
 
 def clean_injury_report_dataframe(df):
     df = df.copy()
@@ -678,6 +779,13 @@ def apply_availability_updates(
     )
 
     if updates_df.empty:
+        roster_df["availabilityStatus"] = "UNKNOWN"
+        roster_df["availabilityReason"] = None
+        roster_df["availabilityConfidence"] = None
+        roster_df["availabilitySourceType"] = None
+        roster_df["availabilitySourceUrl"] = None
+        roster_df["availabilityPublishedAt"] = None
+
         return roster_df
 
     roster_df = roster_df.merge(
@@ -697,17 +805,24 @@ def apply_availability_updates(
     return roster_df
 
 def retrieve_official_injury_updates(
-    report_date,
-    report_hour,
+    prediction_timestamp,
     history_df,
 ):
-    path = download_injury_report(
-        report_date=report_date,
-        report_hour=report_hour,
+    (
+        path,
+        source_url,
+        report_time,
+    ) = find_latest_injury_report(
+        prediction_timestamp
     )
 
-    df = build_injury_report_dataframe(path)
-    df = clean_injury_report_dataframe(df)
+    df = build_injury_report_dataframe(
+        path
+    )
+
+    df = clean_injury_report_dataframe(
+        df
+    )
 
     history_lookup = build_player_lookup(
         history_df
@@ -719,7 +834,9 @@ def retrieve_official_injury_updates(
 
     df["normalizedName"] = (
         df["playerName"]
-        .apply(injury_name_to_normalized)
+        .apply(
+            injury_name_to_normalized
+        )
     )
 
     matched = df.merge(
@@ -768,7 +885,7 @@ def retrieve_official_injury_updates(
 
     fallback = matched.loc[
         unmatched_mask,
-        ["normalizedName"]
+        ["normalizedName"],
     ].merge(
         fallback_candidates,
         on="normalizedName",
@@ -794,14 +911,11 @@ def retrieve_official_injury_updates(
         "matchSource",
     ] = "master_directory"
 
-    source_url = build_injury_report_url(
-        report_date=report_date,
-        report_hour=report_hour,
-    )
-
-    updates = injury_dataframe_to_updates(
-        matched,
-        source_url=source_url,
+    updates = (
+        injury_dataframe_to_updates(
+            matched,
+            source_url=source_url,
+        )
     )
 
     return updates

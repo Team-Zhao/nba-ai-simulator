@@ -23,19 +23,24 @@ MODEL_DIR.mkdir(exist_ok=True)
 
 LINEAR_MODEL_PATH = (
     MODEL_DIR
-    / "linear_game_model_v1.joblib"
+    / "linear_game_model_v2.joblib"
 )
 
 LOGISTIC_MODEL_PATH = (
     MODEL_DIR
-    / "logistic_game_model_v1.joblib"
+    / "logistic_game_model_v2.joblib"
+)
+
+XGBOOST_MODEL_PATH = (
+    MODEL_DIR
+    / "xgboost_game_model_v2.joblib"
 )
 
 PROCESSED_DATA_DIR = Path("data/processed")
 
 INPUT_PATH = (
     PROCESSED_DATA_DIR
-    / "game_features_2025_26.csv"
+    / "game_features_rolling.csv"
 )
 
 FEATURE_COLS = [
@@ -66,16 +71,28 @@ def chronological_split(
     df,
     train_ratio=0.8,
 ):
-    split_index = int(
-        len(df) * train_ratio
+    unique_dates = (
+        df["gameDate"]
+        .drop_duplicates()
+        .sort_values()
+        .reset_index(drop=True)
     )
 
-    train_df = df.iloc[
-        :split_index
+    split_index = int(
+        len(unique_dates)
+        * train_ratio
+    )
+
+    cutoff_date = unique_dates.iloc[
+        split_index
+    ]
+
+    train_df = df[
+        df["gameDate"] < cutoff_date
     ].copy()
 
-    test_df = df.iloc[
-        split_index:
+    test_df = df[
+        df["gameDate"] >= cutoff_date
     ].copy()
 
     return train_df, test_df
@@ -334,6 +351,28 @@ def train_xgboost_model(
 
 if __name__ == "__main__":
     df = load_data()
+    print("\nDataset shape:")
+    print(df.shape)
+
+    print("\nDataset date range:")
+    print(
+        df["gameDate"].min(),
+        "to",
+        df["gameDate"].max(),
+    )
+
+    print("\nMissing feature values:")
+    print(
+        df[FEATURE_COLS]
+        .isna()
+        .sum()
+    )
+
+    print("\nHome win distribution:")
+    print(
+        df["homeWin"]
+        .value_counts()
+    )
 
     train_df, test_df = (
         chronological_split(df)
@@ -359,6 +398,23 @@ if __name__ == "__main__":
     ) = train_logistic_model(
         train_df,
         test_df,
+    )
+    print("\nChronological split:")
+
+    print(
+        "Train:",
+        len(train_df),
+        train_df["gameDate"].min(),
+        "to",
+        train_df["gameDate"].max(),
+    )
+
+    print(
+        "Test:",
+        len(test_df),
+        test_df["gameDate"].min(),
+        "to",
+        test_df["gameDate"].max(),
     )
 
     print(
@@ -692,6 +748,10 @@ if __name__ == "__main__":
         logistic_model,
         LOGISTIC_MODEL_PATH,
     )
+    joblib.dump(
+        xgb_model,
+        XGBOOST_MODEL_PATH,
+    )
 
     print(
         f"Saved linear model to "
@@ -701,4 +761,8 @@ if __name__ == "__main__":
     print(
         f"Saved logistic model to "
         f"{LOGISTIC_MODEL_PATH}"
+    )
+    print(
+        f"Saved XGBoost model to "
+        f"{XGBOOST_MODEL_PATH}"
     )
