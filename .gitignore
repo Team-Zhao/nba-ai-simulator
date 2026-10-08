@@ -8,5 +8,9 @@ __pycache__/
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 
+data/raw/injury_reports/
+data/processed/pregame_backtest_*.csv
+data/processed/team_model_*.csv
+
 # Optional small sample files
 !data/sample/

@@ -8,6 +8,9 @@ from nba_ai_simulator.features.build_rolling_team_features import (
     build_team_game_ratings,
     RATING_COLS,
 )
+from nba_ai_simulator.models.predict_game import (
+    predict_from_game_features,
+)
 from datetime import datetime
 from nba_ai_simulator.retrieval.injury_report_retriever import (
     retrieve_official_injury_updates,
@@ -401,61 +404,16 @@ def apply_roster_status_adjustment(roster):
 
     return roster
 
-def main():
-    history = load_player_history()
-
-    ratings = pd.read_csv(
-        "data/processed/player_ratings_rolling.csv",
-        parse_dates=["gameDate"],
-        dtype={"gameId": str},
-    )
-
-    ratings["gameId"] = (
-        ratings["gameId"]
-        .str.zfill(10)
-    )
-
-    print("Shape:", history.shape)
-    print("Unique games:", history["gameId"].nunique())
-    print("Unique players:", history["personId"].nunique())
-
-    print(
-        "Date range:",
-        history["gameDate"].min(),
-        "to",
-        history["gameDate"].max(),
-    )
-
-    duplicate_keys = history.duplicated(
-        ["gameId", "personId"]
-    ).sum()
-
-    print("Duplicate player-game keys:", duplicate_keys)
-    print(
-        "Missing dates:",
-        history["gameDate"].isna().sum(),
-    )
-
-    assert duplicate_keys == 0
-    assert history["gameDate"].notna().all()
-
-    # --------------------------------------------------
-    # Test one historical pregame roster
-    # --------------------------------------------------
-
-    prediction_date = "2025-01-15"
-
-    prediction_timestamp = datetime(
-        2025,
-        1,
-        15,
-        18,
-        0,
-    )
-
-    game_id = "PREGAME_NYK_PHI_2025_01_15"
-    team = "NYK"
-
+def build_pregame_team_rating(
+    history,
+    ratings,
+    updates,
+    team,
+    team_name,
+    prediction_date,
+    prediction_timestamp,
+    game_id,
+):
     roster = build_pregame_roster(
         history=history,
         team=team,
@@ -480,45 +438,21 @@ def main():
         roster
     )
 
-    # --------------------------------------------------
-    # Retrieve official NBA injury report
-    # --------------------------------------------------
-
-    updates = retrieve_official_injury_updates(
-        report_date=datetime(
-            2025,
-            1,
-            15,
-        ),
-        report_hour="05PM",
-        history_df=history,
-    )
-
-    # Only use information available before prediction time
-    game_updates = filter_updates_for_game(
-        updates,
-        team_names={
-            "New York Knicks",
-        },
-        prediction_timestamp=prediction_timestamp
-    )
-
-    print(
-        "\nOfficial NYK availability updates:",
-        len(game_updates),
-    )
-
-    # --------------------------------------------------
-    # Merge availability into pregame roster
-    # --------------------------------------------------
-
     roster = apply_roster_status_adjustment(
         roster
     )
 
+    team_updates = filter_updates_for_game(
+        updates,
+        team_names={
+            team_name,
+        },
+        prediction_timestamp=prediction_timestamp,
+    )
+
     roster = apply_availability_updates(
         roster,
-        game_updates,
+        team_updates,
     )
 
     roster = apply_availability_adjustment(
@@ -528,297 +462,374 @@ def main():
     roster = attach_pregame_player_ratings(
         roster=roster,
         ratings=ratings,
-        team="NYK",
+        team=team,
         prediction_date=prediction_date,
     )
+
     roster = add_cold_start_ratings(
         roster
     )
 
     roster["gameId"] = game_id
-
     roster["gameDate"] = pd.Timestamp(
-        "2025-01-15"
+        prediction_date
     )
+    roster["teamTricode"] = team
 
-    roster["teamTricode"] = "NYK"
-
-    baseline_team_rating = build_team_game_ratings(
+    baseline_rating = build_team_game_ratings(
         roster,
         weight_col="expectedMinutesRosterAdjusted",
     )
-    print("\nBaseline NYK team rating:")
-    print(
-        baseline_team_rating.to_string(
-            index=False
-        )
-    )
 
-    injury_team_rating = build_team_game_ratings(
+    injury_rating = build_team_game_ratings(
         roster,
         weight_col="expectedMinutesAdjusted",
     )
 
-    comparison = baseline_team_rating.copy()
+    return (
+        roster,
+        baseline_rating,
+        injury_rating,
+    )
 
-    for rating in RATING_COLS:
-        comparison[
-            f"{rating}Delta"
-        ] = (
-            injury_team_rating.iloc[0][rating]
-            - baseline_team_rating.iloc[0][rating]
-        )
-    nyk_roster = roster
-    nyk_baseline = baseline_team_rating
-    nyk_injury = injury_team_rating
-    print("\nInjury impact on NYK ratings:")
+def build_pregame_player_features(
+    home_roster,
+    away_roster,
+    game_id,
+    prediction_date,
+):
+    home = home_roster.copy()
+    away = away_roster.copy()
+
+    home["isHome"] = True
+    away["isHome"] = False
+
+    players = pd.concat(
+        [home, away],
+        ignore_index=True,
+    )
+
+    players["gameId"] = game_id
+    players["gameDate"] = pd.Timestamp(
+        prediction_date
+    )
+
+    keep_cols = [
+        "gameId",
+        "gameDate",
+        "teamTricode",
+        "isHome",
+        "personId",
+        "firstName",
+        "familyName",
+        "rosterStatus",
+        "availabilityStatus",
+        "expectedMinutes",
+        "expectedMinutesRosterAdjusted",
+        "expectedMinutesAdjusted",
+        "ratingSource",
+        *RATING_COLS,
+    ]
+
+    players = players[
+        keep_cols
+    ].copy()
+
+    return players
+
+def main():
+    # --------------------------------------------------
+    # Load historical data
+    # --------------------------------------------------
+
+    history = load_player_history()
+
+    ratings = pd.read_csv(
+        "data/processed/player_ratings_rolling.csv",
+        parse_dates=["gameDate"],
+        dtype={"gameId": str},
+    )
+
+    ratings["gameId"] = (
+        ratings["gameId"]
+        .str.zfill(10)
+    )
+
+    print("Shape:", history.shape)
+    print(
+        "Unique games:",
+        history["gameId"].nunique(),
+    )
+    print(
+        "Unique players:",
+        history["personId"].nunique(),
+    )
 
     print(
-        comparison[
+        "Date range:",
+        history["gameDate"].min(),
+        "to",
+        history["gameDate"].max(),
+    )
+
+    duplicate_keys = history.duplicated(
+        ["gameId", "personId"]
+    ).sum()
+
+    print(
+        "Duplicate player-game keys:",
+        duplicate_keys,
+    )
+
+    print(
+        "Missing dates:",
+        history["gameDate"].isna().sum(),
+    )
+
+    assert duplicate_keys == 0
+    assert history["gameDate"].notna().all()
+
+    # --------------------------------------------------
+    # Historical pregame test setup
+    # NYK @ PHI — 2025-01-15
+    # --------------------------------------------------
+
+    prediction_date = "2026-02-01"
+
+    prediction_timestamp = datetime(
+        2026,
+        2,
+        1,
+        17,
+        30,
+    )
+
+    game_id = (
+        "PREGAME_TOR_UTA_2026_02_01"
+    )
+
+    # --------------------------------------------------
+    # Retrieve official NBA injury report once
+    # --------------------------------------------------
+
+    updates = retrieve_official_injury_updates(
+        prediction_timestamp=prediction_timestamp,
+        history_df=history,
+    )
+
+    # --------------------------------------------------
+    # Build NYK pregame team rating
+    # --------------------------------------------------
+
+    tor_roster, tor_baseline, tor_injury = (
+        build_pregame_team_rating(
+            history=history,
+            ratings=ratings,
+            updates=updates,
+            team="TOR",
+            team_name="Toronto Raptors",
+            prediction_date=prediction_date,
+            prediction_timestamp=prediction_timestamp,
+            game_id=game_id,
+        )
+    )
+
+    # --------------------------------------------------
+    # Build PHI pregame team rating
+    # --------------------------------------------------
+
+    uta_roster, uta_baseline, uta_injury = (
+        build_pregame_team_rating(
+            history=history,
+            ratings=ratings,
+            updates=updates,
+            team="UTA",
+            team_name="Utah Jazz",
+            prediction_date=prediction_date,
+            prediction_timestamp=prediction_timestamp,
+            game_id=game_id,
+        )
+    )
+
+    player_features = (
+        build_pregame_player_features(
+            home_roster=tor_roster,
+            away_roster=uta_roster,
+            game_id=game_id,
+            prediction_date=prediction_date,
+        )
+    )
+    print(
+        "\nPlayer-level pregame features:"
+    )
+
+    print(
+        player_features[
             [
                 "teamTricode",
-                *[
-                    f"{rating}Delta"
-                    for rating in RATING_COLS
-                ],
-            ]
-        ].to_string(index=False)
-    )
-
-    print(
-        "\nInjury-aware NYK team rating:"
-    )
-
-    print(
-        injury_team_rating.to_string(
-            index=False
-        )
-    )
-    print(
-        roster[
-            [
+                "isHome",
                 "personId",
                 "firstName",
                 "familyName",
                 "availabilityStatus",
                 "expectedMinutesAdjusted",
-                "ratingSource",
                 *RATING_COLS,
             ]
         ]
         .sort_values(
-            "expectedMinutesAdjusted",
-            ascending=False,
-        )
-        .to_string(index=False)
-    )
-
-    print(
-        "\nNYK roster with availability:"
-    )
-
-    print(
-        roster[
             [
-                "personId",
-                "firstName",
-                "familyName",
-                "rosterStatus",
-                "expectedMinutes",
-                "availabilityStatus",
+                "isHome",
                 "expectedMinutesAdjusted",
-                "availabilityReason",
-            ]
-        ]
-        .sort_values(
-            "expectedMinutes",
-            ascending=False,
+            ],
+            ascending=[
+                False,
+                False,
+            ],
         )
         .to_string(index=False)
     )
 
-    # --------------------------------------------------
-    # Sanity checks
-    # --------------------------------------------------
-
-    assert roster["personId"].is_unique
-
-    assert roster[
-        "teamTricode"
-    ].eq("NYK").all()
-
-    assert roster[
-        "expectedMinutes"
-    ].notna().all()
-
-    assert roster[
-        "rosterStatus"
-    ].isin(
-        [
-            "recent_rotation",
-            "uncertain",
-            "stale_candidate",
-        ]
+    assert (
+        player_features["gameId"]
+        == game_id
     ).all()
 
-    print(
-        "\nAvailability status counts:"
+    assert (
+        player_features["personId"]
+        .notna()
+        .all()
     )
+
+    assert (
+        player_features[RATING_COLS]
+        .notna()
+        .all()
+        .all()
+    )
+
+    assert (
+        player_features[
+            "expectedMinutesAdjusted"
+        ]
+        .notna()
+        .all()
+    )
+    # --------------------------------------------------
+    # Debug: team ratings
+    # --------------------------------------------------
 
     print(
-        roster[
-            "availabilityStatus"
-        ].value_counts(
-            dropna=False
-        )
-    )
-
-    phi_roster = build_pregame_roster(
-        history=history,
-        team="PHI",
-        prediction_date=prediction_date,
-    )
-
-    phi_roster = add_recent_appearances(
-        roster=phi_roster,
-        history=history,
-        team="PHI",
-        prediction_date=prediction_date,
-        n_games=10,
-    )
-
-    phi_roster = attach_expected_minutes(
-        roster=phi_roster,
-        history=history,
-        prediction_date=prediction_date,
-    )
-
-    phi_roster = add_roster_status(
-        phi_roster
-    )
-
-    phi_roster = apply_roster_status_adjustment(
-        phi_roster
-    )
-
-    phi_updates = filter_updates_for_game(
-        updates,
-        team_names={
-            "Philadelphia 76ers",
-        },
-        prediction_timestamp=prediction_timestamp,
-    )
-
-    phi_roster = apply_availability_updates(
-        phi_roster,
-        phi_updates,
-    )
-
-    phi_roster = apply_availability_adjustment(
-        phi_roster
-    )
-
-    phi_roster = attach_pregame_player_ratings(
-        roster=phi_roster,
-        ratings=ratings,
-        team="PHI",
-        prediction_date=prediction_date,
-    )
-
-    phi_roster = add_cold_start_ratings(
-        phi_roster
-    )
-
-    phi_roster["gameId"] = game_id
-    phi_roster["gameDate"] = pd.Timestamp(
-        prediction_date
-    )
-    phi_roster["teamTricode"] = "PHI"
-
-    phi_baseline = build_team_game_ratings(
-        phi_roster,
-        weight_col="expectedMinutesRosterAdjusted",
-    )
-
-    phi_injury = build_team_game_ratings(
-        phi_roster,
-        weight_col="expectedMinutesAdjusted",
+        "\nTOR baseline team rating:"
     )
     print(
-        "\nPHI injury-aware team rating:"
-    )
-
-    print(
-        phi_injury.to_string(
+        tor_baseline.to_string(
             index=False
         )
     )
-    print(
-        "\nPHI roster with availability:"
-    )
 
     print(
-        phi_roster[
-            [
-                "personId",
-                "firstName",
-                "familyName",
-                "rosterStatus",
-                "expectedMinutes",
-                "expectedMinutesRosterAdjusted",
-                "availabilityStatus",
-                "expectedMinutesAdjusted",
-                "availabilityReason",
-                "ratingSource",
-            ]
-        ]
-        .sort_values(
-            "expectedMinutes",
-            ascending=False,
+        "\nTOR injury-aware team rating:"
+    )
+    print(
+        tor_injury.to_string(
+            index=False
         )
-        .to_string(index=False)
-    )
-    print(
-        "\nPHI minutes totals:"
     )
 
     print(
-        "Original:",
-        phi_roster["expectedMinutes"].sum(),
+        "\nUTA baseline team rating:"
+    )
+    print(
+        uta_baseline.to_string(
+            index=False
+        )
     )
 
     print(
-        "Roster-adjusted:",
-        phi_roster[
-            "expectedMinutesRosterAdjusted"
-        ].sum(),
+        "\nUTA injury-aware team rating:"
+    )
+    print(
+        uta_injury.to_string(
+            index=False
+        )
     )
 
-    print(
-        "Availability-adjusted:",
-        phi_roster[
-            "expectedMinutesAdjusted"
-        ].sum(),
-    )
+    # --------------------------------------------------
+    # Build game-level pregame features
+    # --------------------------------------------------
+
     team_df = pd.concat(
         [
-            nyk_injury,
-            phi_injury,
+            tor_injury,
+            uta_injury,
         ],
         ignore_index=True,
     )
+
     team_df["isHome"] = (
-        team_df["teamTricode"] == "PHI"
+        team_df["teamTricode"]
+        == "TOR"
     )
-    game_df = build_game_matchup_features(
-        team_df
+
+    game_df = (
+        build_game_matchup_features(
+            team_df
+        )
     )
 
     game_df = add_rating_differences(
         game_df
     )
+    prediction = (
+        predict_from_game_features(
+            game_df
+        )
+    )
     print(
-        "\nNYK @ PHI pregame game features:"
+        "\nPregame prediction:"
+    )
+
+    print(
+        "Home team:",
+        prediction["homeTeam"],
+    )
+
+    print(
+        "Away team:",
+        prediction["awayTeam"],
+    )
+
+    print(
+        "Predicted margin:",
+        round(
+            prediction[
+                "predictedMargin"
+            ],
+            2,
+        ),
+    )
+
+    print(
+        "Logistic home win probability:",
+        f"{prediction['logisticHomeWinProbability']:.1%}",
+    )
+
+    print(
+        "XGBoost home win probability:",
+        f"{prediction['xgboostHomeWinProbability']:.1%}",
+    )
+
+    print(
+        "Predicted winner:",
+        prediction["predictedWinner"],
+    )
+
+    # --------------------------------------------------
+    # Final model-ready features
+    # --------------------------------------------------
+
+    print(
+        "\nUTA @ TOR pregame game features:"
     )
 
     print(
@@ -837,24 +848,40 @@ def main():
                 "reboundingDiff",
                 "physicalDiff",
             ]
-        ].to_string(index=False)
+        ].to_string(
+            index=False
+        )
     )
+
+    # --------------------------------------------------
+    # Sanity checks
+    # --------------------------------------------------
+    assert tor_roster["personId"].is_unique
+    assert uta_roster["personId"].is_unique
+
+    assert (
+        tor_roster["teamTricode"]
+        .eq("TOR")
+        .all()
+    )
+
+    assert (
+        uta_roster["teamTricode"]
+        .eq("UTA")
+        .all()
+    )
+
     assert len(game_df) == 1
 
-    assert game_df.iloc[0]["homeTeam"] == "PHI"
-    assert game_df.iloc[0]["awayTeam"] == "NYK"
+    assert (
+        game_df.iloc[0]["homeTeam"]
+        == "TOR"
+    )
 
-    diff_cols = [
-        "finishingDiff",
-        "shootingDiff",
-        "playmakingDiff",
-        "defenseDiff",
-        "reboundingDiff",
-        "physicalDiff",
-    ]
-
-    assert game_df[diff_cols].notna().all().all()
-
+    assert (
+        game_df.iloc[0]["awayTeam"]
+        == "UTA"
+    )
 
 if __name__ == "__main__":
     main()
