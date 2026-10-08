@@ -16,6 +16,8 @@ from sklearn.metrics import (
     brier_score_loss,
 )
 
+RATING_FEATURE_COUNT = 6
+
 PLAYER_FEATURES = [
     "finishing",
     "shooting",
@@ -89,6 +91,74 @@ def chronological_split(
         train_df,
         test_df,
         cutoff_date,
+    )
+
+def build_explicit_team_features(
+    player_features_raw,
+):
+    ratings = (
+        player_features_raw[
+            ...,
+            :RATING_FEATURE_COUNT
+        ]
+    )
+
+    minutes = (
+        player_features_raw[
+            ...,
+            -1
+        ]
+    )
+
+    minute_sums = (
+        minutes.sum(
+            axis=2,
+            keepdims=True,
+        )
+    )
+
+    minute_sums = np.clip(
+        minute_sums,
+        1e-6,
+        None,
+    )
+
+    weights = (
+        minutes
+        / minute_sums
+    )
+
+    team_ratings = (
+        ratings
+        * weights[
+            ...,
+            None
+        ]
+    ).sum(
+        axis=2
+    )
+
+    home_ratings = (
+        team_ratings[
+            :,
+            0,
+            :
+        ]
+    )
+
+    away_ratings = (
+        team_ratings[
+            :,
+            1,
+            :
+        ]
+    )
+
+    return (
+        home_ratings
+        - away_ratings
+    ).astype(
+        np.float32
     )
 
 def get_player_feature_cols(
@@ -228,22 +298,16 @@ class SharedPlayerEncoderModel(
                 ),
             )
         )
-        self.attention_network = nn.Sequential(
-            nn.Linear(
-                embedding_dim,
-                16,
-            ),
-            nn.Tanh(),
 
-            nn.Linear(
-                16,
-                1,
-            ),
-        )
+        explicit_team_feature_dim = 6
+
+        # total_embedding_dim = (
+        #     2 * embedding_dim
+        #     + explicit_team_feature_dim
+        # )
 
         total_embedding_dim = (
-            2
-            * embedding_dim
+            2 * embedding_dim
         )
 
         self.game_network = (
@@ -279,6 +343,7 @@ class SharedPlayerEncoderModel(
         self,
         x,
         raw_minutes,
+        team_features,
     ):
         batch_size = x.shape[0]
 
@@ -330,71 +395,43 @@ class SharedPlayerEncoderModel(
         # Learned player importance
         # ------------------------------------------
 
-        attention_scores = (
-            self.attention_network(
-                player_embeddings
-            )
-            .squeeze(
-                -1
-            )
-        )
-
+    
         # Shape:
         # [batch, 2, 10]
 
-
-        # ------------------------------------------
-        # Expected-minutes prior
-        # ------------------------------------------
-
-        minute_prior = torch.log(
-            minutes.clamp(
-                min=1e-6
-            )
-        )
-
-        # Shape:
-        # [batch, 2, 10]
 
 
         # ------------------------------------------
         # Combine learned importance + minutes
         # ------------------------------------------
-        ATTENTION_STRENGTH = 0.25
-
-        combined_scores = (
-            minute_prior
-            + ATTENTION_STRENGTH
-            * attention_scores
-        )
-
-        attention_weights = torch.softmax(
-            combined_scores,
-            dim=2,
-        )
 
         # Shape:
         # [batch, 2, 10]
+        minute_sums = (
+            minutes
+            .sum(
+                dim=2,
+                keepdim=True,
+            )
+            .clamp(
+                min=1e-6
+            )
+        )
 
-
-        # ------------------------------------------
-        # Attention-weighted team embedding
-        # ------------------------------------------
+        minute_weights = (
+            minutes
+            / minute_sums
+        )
 
         team_embeddings = (
             player_embeddings
-            * attention_weights.unsqueeze(
+            * minute_weights.unsqueeze(
                 -1
             )
         ).sum(
             dim=2
         )
 
-        # Shape:
-        # [batch, 2, embedding_dim]
-
-        # Shape:
-        # [batch, 2, embedding_dim]
 
         # ------------------------------------------
         # Home + Away team embeddings
@@ -414,16 +451,6 @@ class SharedPlayerEncoderModel(
                 1,
                 :
             ]
-        )
-
-        difference_embedding = (
-            home_embedding
-            - away_embedding
-        )
-
-        interaction_embedding = (
-            home_embedding
-            * away_embedding
         )
 
         game_embedding = torch.cat(
@@ -454,6 +481,7 @@ def evaluate_model(
     model,
     X,
     minutes,
+    team_features,
     y,
 ):
     model.eval()
@@ -462,6 +490,7 @@ def evaluate_model(
         logits = model(
             X,
             minutes,
+            team_features,
         )
 
         probabilities = (
@@ -656,6 +685,45 @@ def train_one_fold(
         )
     )
 
+    fit_team_features_raw = (
+        build_explicit_team_features(
+            fit_players_raw
+        )
+    )
+
+    validation_team_features_raw = (
+        build_explicit_team_features(
+            validation_players_raw
+        )
+    )
+    team_scaler = StandardScaler()
+
+    fit_team_features_scaled = (
+        team_scaler.fit_transform(
+            fit_team_features_raw
+        )
+        .astype(
+            np.float32
+        )
+    )
+
+    validation_team_features_scaled = (
+        team_scaler.transform(
+            validation_team_features_raw
+        )
+        .astype(
+            np.float32
+        )
+    )
+    fit_team_features = torch.tensor(
+        fit_team_features_scaled,
+        dtype=torch.float32,
+    )
+
+    validation_team_features = torch.tensor(
+        validation_team_features_scaled,
+        dtype=torch.float32,
+    )
     fit_minutes_raw = (
         fit_players_raw[
             ...,
@@ -707,23 +775,59 @@ def train_one_fold(
     # Standardize
     # ------------------------------------------
 
-    scaler = StandardScaler()
+# ------------------------------------------
+# Standardize player features
+#
+# Fit one common scaler across ALL player
+# slots so the shared player encoder sees
+# the same feature scale for every player.
+# ------------------------------------------
 
-    X_fit_scaled = (
-        scaler.fit_transform(
-            X_fit_raw
+    player_scaler = StandardScaler()
+
+    fit_player_rows = (
+        fit_players_raw.reshape(
+            -1,
+            len(PLAYER_FEATURES),
+        )
+    )
+
+    validation_player_rows = (
+        validation_players_raw.reshape(
+            -1,
+            len(PLAYER_FEATURES),
+        )
+)
+
+    fit_player_rows_scaled = (
+        player_scaler.fit_transform(
+            fit_player_rows
         )
         .astype(
             np.float32
         )
     )
 
-    X_validation_scaled = (
-        scaler.transform(
-            X_validation_raw
+    validation_player_rows_scaled = (
+        player_scaler.transform(
+            validation_player_rows
         )
         .astype(
             np.float32
+        )
+    )
+
+    X_fit_scaled = (
+        fit_player_rows_scaled.reshape(
+            len(fit_df),
+            -1,
+        )
+    )
+
+    X_validation_scaled = (
+        validation_player_rows_scaled.reshape(
+            len(validation_df),
+            -1,
         )
     )
 
@@ -758,6 +862,7 @@ def train_one_fold(
     fit_dataset = TensorDataset(
         X_fit,
         fit_minutes,
+        fit_team_features,
         y_fit,
     )
 
@@ -828,6 +933,7 @@ def train_one_fold(
         for (
             batch_X,
             batch_minutes,
+            batch_team_features,
             batch_y,
         ) in fit_loader:
 
@@ -836,6 +942,7 @@ def train_one_fold(
             logits = model(
                 batch_X,
                 batch_minutes,
+                batch_team_features,
             )
 
             loss = criterion(
@@ -862,6 +969,7 @@ def train_one_fold(
                 model,
                 X_validation,
                 validation_minutes,
+                validation_team_features,
                 y_validation,
             )
         )
@@ -918,6 +1026,7 @@ def train_one_fold(
             model,
             X_validation,
             validation_minutes,
+            validation_team_features,
             y_validation,
         )
     )
@@ -1007,9 +1116,15 @@ def main():
         TOP_N_PLAYERS,
     ) * 36
 
+    dummy_team_features = torch.randn(
+        5,
+        RATING_FEATURE_COUNT,
+    )
+
     dummy_output = test_model(
         dummy_input,
         dummy_minutes,
+        dummy_team_features,
     )
 
     print()
@@ -1238,7 +1353,37 @@ def main():
         ]
         .mean()
     )
+    print()
+    print("================================")
+    print("Best Epoch Analysis")
+    print("================================")
 
+    print(
+        results_df[
+            ["seed", "fold", "best_epoch"]
+        ].to_string(index=False)
+    )
+
+    print()
+    print(
+        "Median best epoch:",
+        results_df["best_epoch"].median()
+    )
+
+    print(
+        "Mean best epoch:",
+        results_df["best_epoch"].mean()
+    )
+
+    print()
+    print(
+        "Best epoch by fold:"
+    )
+
+    print(
+        results_df.groupby("fold")["best_epoch"]
+        .agg(["mean", "median", "min", "max"])
+    )
 #     # ------------------------------------------
 #     # 4. Convert pandas -> NumPy
 #     # ------------------------------------------
